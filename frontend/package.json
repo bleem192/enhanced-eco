@@ -1,0 +1,23 @@
+{
+  "name": "ecommerce-frontend",
+  "version": "1.0.0",
+  "description": "电子商务网站前端",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.3.4",
+    "vue-router": "^4.2.5",
+    "pinia": "^2.1.7",
+    "element-plus": "^2.3.14",
+    "axios": "^1.5.0",
+    "echarts": "^5.4.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^4.4.0",
+    "vite": "^5.0.0",
+    "sass": "^1.69.5"
+  }
+}
