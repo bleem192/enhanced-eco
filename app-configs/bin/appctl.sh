@@ -122,6 +122,9 @@ extract_new_version() {
 install_dependencies() {
     log_info "安装后端依赖..."
     
+    # 设置 Node.js 路径
+    export PATH="$PATH:/usr/local/bin:/usr/bin:/home/admin/.nvm/versions/node/v18.17.0/bin"
+    
     cd $BACKEND_DIR
     
     if [ -f "package.json" ]; then
