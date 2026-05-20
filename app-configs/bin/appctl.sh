@@ -12,6 +12,7 @@ APP_DIR="/var/www/ecommerce"
 BACKEND_DIR="$APP_DIR/backend"
 FRONTEND_DIR="$APP_DIR/frontend"
 LOG_DIR="$BACKEND_DIR/logs"
+BACKUP_DIR="$APP_DIR/backups"  # 新增：提前定义备份目录
 PM2_NAME="ecommerce-backend"
 
 # 颜色输出
@@ -73,16 +74,16 @@ backup_old_version() {
     
     if [ -d "$BACKEND_DIR" ] && [ "$(ls -A $BACKEND_DIR)" ]; then
         BACKUP_NAME="backup_$(date +%Y%m%d_%H%M%S)"
-        BACKUP_DIR="$APP_DIR/backups/$BACKUP_NAME"
-        mkdir -p $BACKUP_DIR
+        CURRENT_BACKUP_DIR="$BACKUP_DIR/$BACKUP_NAME"
+        mkdir -p $CURRENT_BACKUP_DIR
         
-        cp -r $BACKEND_DIR $BACKUP_DIR/ 2>/dev/null || true
-        cp -r $FRONTEND_DIR $BACKUP_DIR/ 2>/dev/null || true
+        cp -r $BACKEND_DIR $CURRENT_BACKUP_DIR/ 2>/dev/null || true
+        cp -r $FRONTEND_DIR $CURRENT_BACKUP_DIR/ 2>/dev/null || true
         
-        log_info "备份完成: $BACKUP_DIR"
+        log_info "备份完成: $CURRENT_BACKUP_DIR"
         
         # 保留最近7个备份
-        cd $APP_DIR/backups
+        cd $BACKUP_DIR
         ls -t | tail -n +8 | xargs -r rm -rf
     else
         log_warn "未找到旧版本，跳过备份"
@@ -95,14 +96,22 @@ backup_old_version() {
 extract_new_version() {
     log_info "解压新版本..."
     
-    # 查找压缩包
-    PACKAGE_FILE=$(find /tmp -name "*.tgz" -o -name "*.tar.gz" 2>/dev/null | head -1)
+    # 优先查找指定路径的压缩包
+    PACKAGE_FILE=""
+    if [ -f "/home/admin/app/package2.tgz" ]; then
+        PACKAGE_FILE="/home/admin/app/package2.tgz"
+    elif [ -f "/home/admin/app/package.tgz" ]; then
+        PACKAGE_FILE="/home/admin/app/package.tgz"
+    else
+        # 查找其他可能的压缩包
+        PACKAGE_FILE=$(find /tmp /home -name "*.tgz" -o -name "*.tar.gz" 2>/dev/null | head -1)
+    fi
     
     if [ -f "$PACKAGE_FILE" ]; then
-        tar -zxvf $PACKAGE_FILE -C $APP_DIR/
+        tar -zxf $PACKAGE_FILE -C $APP_DIR/
         log_info "解压完成: $PACKAGE_FILE"
     else
-        log_error "未找到压缩包: $PACKAGE_FILE"
+        log_error "未找到压缩包！请检查文件是否存在。"
         exit 1
     fi
 }
@@ -129,7 +138,8 @@ install_dependencies() {
     
     if [ -f "package.json" ]; then
         npm install
-        log_info "前端依赖安装完成"
+        npm run build
+        log_info "前端构建完成"
     fi
 }
 
@@ -229,12 +239,12 @@ cleanup() {
     log_info "清理临时文件..."
     
     # 清理旧备份（保留7天）
-    if [ -d "$APP_DIR/backups" ]; then
-        find $APP_DIR/backups -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+    if [ -d "$BACKUP_DIR" ]; then
+        find $BACKUP_DIR -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
     fi
     
     # 清理 PM2 日志
-    pm2 flush
+    pm2 flush 2>/dev/null || true
     
     log_info "清理完成"
 }
@@ -245,37 +255,40 @@ cleanup() {
 rollback() {
     log_error "部署失败，执行回滚..."
     
-    BACKUP_DIR=$(ls -t $APP_DIR/backups | head -1)
-    
-    if [ -n "$BACKUP_DIR" ]; then
-        log_info "从 $APP_DIR/backups/$BACKUP_DIR 回滚..."
-        
-        # 停止当前服务
-        pm2 stop $PM2_NAME 2>/dev/null || true
-        pm2 delete $PM2_NAME 2>/dev/null || true
-        
-        # 恢复备份
-        rm -rf $BACKEND_DIR $FRONTEND_DIR
-        cp -r $APP_DIR/backups/$BACKUP_DIR/backend $APP_DIR/
-        cp -r $APP_DIR/backups/$BACKUP_DIR/frontend $APP_DIR/
-        
-        # 重启服务
-        cd $BACKEND_DIR
-        npm install --production 2>/dev/null || true
-        
-        if [ -f "ecosystem.config.js" ]; then
-            pm2 start ecosystem.config.js
-        else
-            pm2 start server.js --name $PM2_NAME
+    # 查找最近的备份
+    if [ -d "$BACKUP_DIR" ]; then
+        BACKUP_NAME=$(ls -t $BACKUP_DIR | head -1)
+        if [ -n "$BACKUP_NAME" ]; then
+            log_info "从 $BACKUP_DIR/$BACKUP_NAME 回滚..."
+            
+            # 停止当前服务
+            pm2 stop $PM2_NAME 2>/dev/null || true
+            pm2 delete $PM2_NAME 2>/dev/null || true
+            
+            # 恢复备份
+            rm -rf $BACKEND_DIR $FRONTEND_DIR
+            cp -r $BACKUP_DIR/$BACKUP_NAME/backend $APP_DIR/
+            cp -r $BACKUP_DIR/$BACKUP_NAME/frontend $APP_DIR/
+            
+            # 重启服务
+            cd $BACKEND_DIR
+            npm install --production 2>/dev/null || true
+            
+            if [ -f "ecosystem.config.js" ]; then
+                pm2 start ecosystem.config.js
+            else
+                pm2 start server.js --name $PM2_NAME
+            fi
+            
+            pm2 save
+            
+            log_info "回滚完成"
+            exit 0
         fi
-        
-        pm2 save
-        
-        log_info "回滚完成"
-    else
-        log_error "没有可用的备份，回滚失败"
-        exit 1
     fi
+    
+    log_error "没有可用的备份，回滚失败"
+    exit 1
 }
 
 # ============================================================
