@@ -1,0 +1,24 @@
+{
+  "name": "app-configs",
+  "version": "1.0.0",
+  "description": "Application configuration files for deployment",
+  "scripts": {
+    "deploy": "appctl.sh deploy",
+    "restart": "appctl.sh restart",
+    "stop": "appctl.sh stop",
+    "status": "appctl.sh status",
+    "logs": "appctl.sh logs"
+  },
+  "deploy": {
+    "production": {
+      "user": "root",
+      "host": "your-server-ip",
+      "path": "/var/www/ecommerce",
+      "scripts": {
+        "deploy": "./app-configs/bin/appctl.sh deploy",
+        "restart": "./app-configs/bin/appctl.sh restart",
+        "rollback": "./app-configs/bin/appctl.sh rollback"
+      }
+    }
+  }
+}
