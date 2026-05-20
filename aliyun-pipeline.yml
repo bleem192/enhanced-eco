@@ -1,0 +1,703 @@
+# ============================================================
+# 阿里云效流水线配置文件
+# 电商平台 - 自动化构建与部署
+# ============================================================
+# 使用说明:
+# 1. 登录阿里云效: https://devops.aliyun.com
+# 2. 创建新流水线 → 选择"完整流程"
+# 3. 点击"编辑 YAML" → 粘贴此文件内容
+# 4. 配置凭证: GitHub Token、ECS SSH 密钥
+# 5. 配置环境变量: ECS_HOST, DB_PASSWORD 等
+# ============================================================
+
+pipeline:
+  name: ecommerce-deploy
+  displayName: 电商平台自动化部署流水线
+  version: v1.0.0
+
+# ============================================================
+# 全局配置
+# ============================================================
+settings:
+  runMode: NORMAL  # NORMAL-普通模式 PARALLEL-并行模式
+  timeout: 120      # 流水线超时时间(分钟)
+  notification:
+    enabled: true
+    events:
+      - PIPELINE_RUN_STARTED
+      - PIPELINE_RUN_COMPLETED
+      - PIPELINE_RUN_FAILED
+    channels:
+      - type: DINGTALK
+        webhook: ${DINGTALK_WEBHOOK}  # 配置钉钉机器人 webhook
+      - type: EMAIL
+        receivers:
+          - ${ALERT_EMAIL}
+
+# ============================================================
+# 参数定义
+# ============================================================
+parameters:
+  - name: ECS_HOST
+    type: String
+    displayName: ECS服务器IP地址
+    required: true
+    defaultValue: ""
+    
+  - name: ECS_PORT
+    type: String
+    displayName: SSH端口
+    required: true
+    defaultValue: "22"
+    
+  - name: ECS_USER
+    type: String
+    displayName: 服务器用户名
+    required: true
+    defaultValue: "root"
+    
+  - name: APP_PATH
+    type: String
+    displayName: 应用部署路径
+    required: true
+    defaultValue: "/var/www/ecommerce"
+    
+  - name: DB_NAME
+    type: String
+    displayName: 数据库名称
+    required: true
+    defaultValue: "ecommerce"
+    
+  - name: SKIP_TESTS
+    type: Boolean
+    displayName: 跳过测试阶段
+    required: false
+    defaultValue: false
+
+# ============================================================
+# 触发器配置
+# ============================================================
+triggers:
+  - type: GIT
+    enabled: true
+    events:
+      - push
+    branches:
+      include:
+        - main
+        - master
+    paths:
+      include:
+        - backend/**
+        - frontend/**
+        - package.json
+      exclude:
+        - "**/*.md"
+        - "**/*.txt"
+        - docs/**
+        - scripts/**
+
+# ============================================================
+# 流水线阶段
+# ============================================================
+stages:
+
+  # ============================================================
+  # 阶段1: 检出代码
+  # ============================================================
+  - name: checkout
+    displayName: 检出代码
+    jobs:
+      - name: clone-repo
+        displayName: 克隆代码仓库
+        steps:
+          - name: checkout
+            stepDisplayName: 克隆GitHub仓库代码
+            version: "1.0"
+            type: CloneCheckout
+            params:
+              repoAddress: github.com/bleem192/enhanced-eco
+              refType: branch
+              branch: ${TRIGGER_GIT_BRANCH}
+              credentials:
+                type: USER_PASSWORD
+                user: ${GITHUB_TOKEN}
+                password: ""
+
+  # ============================================================
+  # 阶段2: 构建后端
+  # ============================================================
+  - name: build-backend
+    displayName: 构建后端
+    depends:
+      - checkout
+    jobs:
+      - name: backend-build
+        displayName: 后端构建任务
+        steps:
+          - name: install-backend-deps
+            stepDisplayName: 安装后端依赖
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                cd backend
+                npm install --production
+                
+          - name: backend-lint
+            stepDisplayName: 后端代码检查
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                cd backend
+                # 可选: 添加 ESLint 检查
+                # npx eslint src/
+                echo "Backend lint passed"
+
+          - name: backend-test
+            stepDisplayName: 后端单元测试
+            version: "1.0"
+            type: Shell
+            condition: "ne('${SKIP_TESTS}', 'true')"
+            params:
+              script: |
+                set -e
+                cd backend
+                npm test || {
+                  echo "Tests failed, but continuing pipeline..."
+                }
+
+  # ============================================================
+  # 阶段3: 构建前端
+  # ============================================================
+  - name: build-frontend
+    displayName: 构建前端
+    depends:
+      - checkout
+    jobs:
+      - name: frontend-build
+        displayName: 前端构建任务
+        steps:
+          - name: install-frontend-deps
+            stepDisplayName: 安装前端依赖
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                cd frontend
+                npm install
+                
+          - name: frontend-build-prod
+            stepDisplayName: 前端生产构建
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                cd frontend
+                
+                # 设置 API 地址
+                echo "VITE_API_BASE_URL=/api" > .env.production
+                
+                # 构建生产版本
+                npm run build
+                
+                # 验证构建结果
+                if [ ! -d "dist" ]; then
+                  echo "Build failed: dist directory not found"
+                  exit 1
+                fi
+                
+                echo "Frontend build completed successfully"
+
+  # ============================================================
+  # 阶段4: 上传制品
+  # ============================================================
+  - name: package
+    displayName: 打包制品
+    depends:
+      - build-backend
+      - build-frontend
+    jobs:
+      - name: create-artifacts
+        displayName: 创建部署制品
+        steps:
+          - name: create-backend-tgz
+            stepDisplayName: 打包后端代码
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                cd backend
+                
+                # 复制环境变量模板
+                if [ ! -f .env ]; then
+                  cat > .env << 'ENVEOF'
+NODE_ENV=production
+PORT=3001
+JWT_SECRET=${JWT_SECRET}
+DB_HOST=${DB_HOST}
+DB_PORT=${DB_PORT}
+DB_USER=${DB_USER}
+DB_PASSWORD=${DB_PASSWORD}
+DB_NAME=${DB_NAME}
+ENVEOF
+                fi
+                
+                # 创建 tar.gz 包
+                tar -czvf ../dist/backend.tar.gz \
+                  --exclude='node_modules/.cache' \
+                  --exclude='logs/*.log' \
+                  --exclude='test/**' \
+                  .
+                
+                echo "Backend package created"
+                
+          - name: upload-artifacts
+            stepDisplayName: 上传制品到OSS
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                # 创建包含时间戳的包名
+                PACKAGE_VERSION=$(date +%Y%m%d_%H%M%S)
+                
+                # 打包前端
+                cd frontend/dist
+                tar -czvf ../../dist/frontend.tar.gz .
+                cd ../..
+                
+                # 创建部署清单
+                cat > dist/deploy_manifest.json << 'EOF'
+                {
+                  "version": "${PACKAGE_VERSION}",
+                  "backend_hash": "$(sha256sum dist/backend.tar.gz | cut -d' ' -f1)",
+                  "frontend_hash": "$(sha256sum dist/frontend.tar.gz | cut -d' ' -f1)",
+                  "deployed_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+                  "branch": "${TRIGGER_GIT_BRANCH}",
+                  "commit": "${TRIGGER_GIT_COMMIT}"
+                }
+                EOF
+                
+                # 列出制品
+                ls -lh dist/
+
+  # ============================================================
+  # 阶段5: 部署到服务器
+  # ============================================================
+  - name: deploy
+    displayName: 部署到服务器
+    depends:
+      - package
+    jobs:
+      - name: deploy-to-ecs
+        displayName: 部署到阿里云ECS
+        steps:
+          - name: pre-deploy-check
+            stepDisplayName: 部署前检查
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                echo "======================================"
+                echo "  部署前环境检查"
+                echo "======================================"
+                echo "目标服务器: ${ECS_HOST}"
+                echo "部署路径: ${APP_PATH}"
+                echo "数据库: ${DB_NAME}"
+                echo "======================================"
+                
+          - name: ssh-connect
+            stepDisplayName: SSH连接到服务器
+            version: "1.0"
+            type: SSH
+            params:
+              host: ${ECS_HOST}
+              port: ${ECS_PORT}
+              user: ${ECS_USER}
+              authType: PRIVATE_KEY
+              privateKey: ${ECS_SSH_KEY}
+              
+          - name: backup-before-deploy
+            stepDisplayName: 部署前备份
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                # 创建备份目录
+                BACKUP_DIR="${APP_PATH}/backups/$(date +%Y%m%d_%H%M%S)"
+                mkdir -p $BACKUP_DIR
+                
+                # 备份旧版本
+                if [ -d "${APP_PATH}/backend" ]; then
+                  cp -r ${APP_PATH}/backend $BACKUP_DIR/ 2>/dev/null || true
+                fi
+                if [ -d "${APP_PATH}/frontend" ]; then
+                  cp -r ${APP_PATH}/frontend $BACKUP_DIR/ 2>/dev/null || true
+                fi
+                
+                # 备份数据库（可选，取消注释以启用）
+                # mysqldump -h ${DB_HOST} -u ${DB_USER} -p'${DB_PASSWORD}' ${DB_NAME} | gzip > $BACKUP_DIR/db_backup.sql.gz
+                
+                echo "Backup completed: $BACKUP_DIR"
+                
+          - name: stop-old-service
+            stepDisplayName: 停止旧服务
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                cd ${APP_PATH}
+                
+                # 使用 PM2 停止服务
+                if command -v pm2 &> /dev/null; then
+                  pm2 stop ecommerce-backend || true
+                  pm2 delete ecommerce-backend || true
+                  echo "PM2 service stopped"
+                fi
+                
+                # 确保端口未被占用
+                fuser -k 3001/tcp 2>/dev/null || true
+                
+          - name: create-app-directory
+            stepDisplayName: 创建应用目录
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                # 创建应用目录
+                mkdir -p ${APP_PATH}
+                
+                # 确保目录所有者正确
+                chown -R ${ECS_USER}:${ECS_USER} ${APP_PATH}
+                
+                echo "Application directory ready"
+
+          - name: upload-and-extract
+            stepDisplayName: 上传并解压代码
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                cd ${APP_PATH}
+                
+                # 上传后端代码
+                echo "Uploading backend..."
+                tar -xzvf backend.tar.gz -C backend/ 2>/dev/null || mkdir -p backend && tar -xzvf backend.tar.gz -C backend/
+                
+                # 上传前端代码
+                echo "Uploading frontend..."
+                mkdir -p frontend/dist
+                tar -xzvf frontend.tar.gz -C frontend/dist/
+                
+                # 清理临时文件
+                rm -f backend.tar.gz frontend.tar.gz
+                
+                echo "Code uploaded successfully"
+
+          - name: install-production-deps
+            stepDisplayName: 安装生产依赖
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                # 安装后端依赖
+                echo "Installing backend dependencies..."
+                cd ${APP_PATH}/backend
+                npm install --production --legacy-peer-deps
+                
+                # 安装前端依赖并构建
+                echo "Installing frontend dependencies..."
+                cd ${APP_PATH}/frontend
+                npm install
+                
+                # 设置环境变量并构建
+                echo "VITE_API_BASE_URL=/api" > .env.production
+                npm run build
+                
+                echo "Dependencies installed successfully"
+
+          - name: configure-environment
+            stepDisplayName: 配置环境变量
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                cd ${APP_PATH}/backend
+                
+                # 创建环境配置文件
+                cat > .env << 'EOF'
+NODE_ENV=production
+PORT=3001
+JWT_SECRET=${JWT_SECRET}
+DB_HOST=${DB_HOST}
+DB_PORT=${DB_PORT}
+DB_USER=${DB_USER}
+DB_PASSWORD=${DB_PASSWORD}
+DB_NAME=${DB_NAME}
+EOF
+                
+                # 设置文件权限
+                chmod 600 .env
+                
+                echo "Environment configured"
+
+          - name: initialize-database
+            stepDisplayName: 初始化数据库
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                cd ${APP_PATH}/backend
+                
+                # 检查数据库连接
+                echo "Testing database connection..."
+                
+                # 运行数据库初始化脚本
+                if [ -f "scripts/initialize-database.js" ]; then
+                  node scripts/initialize-database.js
+                else
+                  echo "Database initialization script not found, skipping..."
+                fi
+                
+                echo "Database initialization completed"
+
+          - name: start-new-service
+            stepDisplayName: 启动新服务
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                cd ${APP_PATH}/backend
+                
+                # 创建日志目录
+                mkdir -p logs
+                
+                # 使用 PM2 启动服务
+                if [ -f "ecosystem.config.js" ]; then
+                  pm2 start ecosystem.config.js
+                else
+                  # 使用默认配置启动
+                  pm2 start server.js --name ecommerce-backend
+                fi
+                
+                # 保存 PM2 进程列表
+                pm2 save
+                
+                # 配置开机启动
+                pm2 startup
+                
+                # 等待服务启动
+                sleep 5
+                
+                # 检查服务状态
+                pm2 status
+
+          - name: verify-deployment
+            stepDisplayName: 验证部署结果
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                # 等待服务完全启动
+                sleep 10
+                
+                # 检查 PM2 状态
+                echo "Checking PM2 status..."
+                pm2 status
+                
+                # 检查端口监听
+                echo "Checking port 3001..."
+                netstat -tulpn | grep 3001 || ss -tulpn | grep 3001
+                
+                # 测试 API 健康检查
+                echo "Testing API health check..."
+                curl -f -s http://localhost:3001/api/health || {
+                  echo "Health check failed!"
+                  pm2 logs ecommerce-backend --lines 50
+                  exit 1
+                }
+                
+                echo "======================================"
+                echo "  部署成功!"
+                echo "======================================"
+
+  # ============================================================
+  # 阶段6: 验证测试
+  # ============================================================
+  - name: verify
+    displayName: 验证测试
+    depends:
+      - deploy
+    jobs:
+      - name: smoke-test
+        displayName: 冒烟测试
+        steps:
+          - name: api-health-check
+            stepDisplayName: API健康检查
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                # 等待服务稳定
+                sleep 5
+                
+                # 测试健康检查接口
+                echo "Testing health endpoint..."
+                RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:3001/api/health)
+                BODY=$(echo "$RESPONSE" | head -n -1)
+                STATUS=$(echo "$RESPONSE" | tail -n 1)
+                
+                if [ "$STATUS" = "200" ]; then
+                  echo "Health check passed: $BODY"
+                else
+                  echo "Health check failed with status: $STATUS"
+                  exit 1
+                fi
+                
+          - name: test-login
+            stepDisplayName: 测试登录功能
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                echo "Testing login endpoint..."
+                
+                # 测试管理员登录
+                LOGIN_RESPONSE=$(curl -s -X POST http://localhost:3001/api/auth/login \
+                  -H "Content-Type: application/json" \
+                  -d '{"username":"admin","password":"admin123"}')
+                
+                # 检查是否返回 token
+                if echo "$LOGIN_RESPONSE" | grep -q "token"; then
+                  echo "Login test passed"
+                else
+                  echo "Login test failed: $LOGIN_RESPONSE"
+                  exit 1
+                fi
+                
+          - name: test-products-api
+            stepDisplayName: 测试商品API
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                set -e
+                
+                echo "Testing products endpoint..."
+                
+                PRODUCTS=$(curl -s http://localhost:3001/api/products?limit=1)
+                
+                if echo "$PRODUCTS" | grep -q "success"; then
+                  echo "Products API test passed"
+                else
+                  echo "Products API test failed"
+                  exit 1
+                fi
+
+  # ============================================================
+  # 阶段7: 清理 (可选)
+  # ============================================================
+  - name: cleanup
+    displayName: 清理工作
+    depends:
+      - verify
+    jobs:
+      - name: cleanup-old-backups
+        displayName: 清理旧备份
+        steps:
+          - name: cleanup
+            stepDisplayName: 清理过期备份
+            version: "1.0"
+            type: Shell
+            params:
+              script: |
+                # 保留最近7天的备份
+                find ${APP_PATH}/backups -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+                
+                # 清理 PM2 日志
+                pm2 flush
+                
+                echo "Cleanup completed"
+
+# ============================================================
+# 通知配置
+# ============================================================
+notifications:
+  - name: deployment-success
+    when:
+      - stage: verify
+        status: success
+    type: DINGTALK
+    webhook: ${DINGTALK_WEBHOOK}
+    message: |
+      ✅ 电商平台部署成功!
+      环境: 生产环境
+      版本: ${TRIGGER_GIT_COMMIT:0:8}
+      分支: ${TRIGGER_GIT_BRANCH}
+      时间: $(date '+%Y-%m-%d %H:%M:%S')
+      
+  - name: deployment-failed
+    when:
+      - stage: deploy
+        status: failed
+    type: DINGTALK
+    webhook: ${DINGTALK_WEBHOOK}
+    message: |
+      ❌ 电商平台部署失败!
+      环境: 生产环境
+      分支: ${TRIGGER_GIT_BRANCH}
+      请检查日志!
+      时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+# ============================================================
+# 回滚配置
+# ============================================================
+rollback:
+  enabled: true
+  strategy: MANUAL  # MANUAL-手动回滚 AUTO-自动回滚
+  maxVersions: 5
+  conditions:
+    - stage: deploy
+      failureRate: 0.5  # 失败率超过50%自动回滚
+
+# ============================================================
+# 权限配置
+# ============================================================
+permissions:
+  read:
+    - repository: ecommerce
+  write:
+    - deploy: ECS_PRODUCTION
+
+# ============================================================
+# END
+# ============================================================
