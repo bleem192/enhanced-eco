@@ -215,6 +215,36 @@ const createTables = async (connection) => {
   `);
   log('✓ system_config table created');
 
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS product_price_history (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      product_id INT NOT NULL,
+      old_price DECIMAL(10, 2) NOT NULL,
+      new_price DECIMAL(10, 2) NOT NULL,
+      changed_by INT NOT NULL,
+      change_reason VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (product_id) REFERENCES products(id),
+      FOREIGN KEY (changed_by) REFERENCES users(id)
+    )
+  `);
+  log('✓ product_price_history table created');
+
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS stock_change_logs (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      product_id INT NOT NULL,
+      change_amount INT NOT NULL,
+      change_type ENUM('increase', 'decrease', 'set') NOT NULL,
+      changed_by INT NOT NULL,
+      change_reason VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (product_id) REFERENCES products(id),
+      FOREIGN KEY (changed_by) REFERENCES users(id)
+    )
+  `);
+  log('✓ stock_change_logs table created');
+
   log('All database tables created successfully');
 };
 
@@ -453,7 +483,7 @@ const verifyInitialization = async (connection) => {
     WHERE table_schema = ?
   `, [config.database]);
 
-  const expectedTables = ['users', 'products', 'orders', 'order_items', 'cart', 'user_behavior', 'operation_logs', 'recommendations', 'user_behavior_logs', 'purchase_logs', 'product_categories', 'login_logs', 'system_config'];
+  const expectedTables = ['users', 'products', 'orders', 'order_items', 'cart', 'user_behavior', 'operation_logs', 'recommendations', 'user_behavior_logs', 'purchase_logs', 'product_categories', 'login_logs', 'system_config', 'product_price_history', 'stock_change_logs'];
   
   for (const tableName of expectedTables) {
     const [tableExists] = await connection.execute(`
